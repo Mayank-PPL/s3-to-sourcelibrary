@@ -11,12 +11,6 @@ __pycache__/
 venv/
 ENV/
 
-# Project-specific
-data/index/*.db
-data/index/*.db-*
-logs/*.log
-temp/*
-
 # IDE
 .vscode/
 .idea/

@@ -88,80 +88,98 @@ class APIClient:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error creating book: {e}")
             return None
+            
 
-    def upload_page(self, book_id: str, page_file_path: str) -> Optional[str]:
+    def upload_page_from_s3(self, book_id: str, s3_url: str) -> Optional[str]:
         """
-        Upload a page image to a book.
-        Backend automatically determines page number based on upload order.
-
-        Expected API response format:
-        {
-          "success": true,
-          "uploaded": 1,
-          "pages": [
-            {
-              "id": "page_id",
-              "book_id": "book_id",
-              "page_number": 1,  # Auto-assigned by backend
-              ...other fields...
-            }
-          ]
-        }
+        Upload page image from S3 presigned URL.
+        API downloads directly from S3 without intermediate temp file.
 
         Args:
             book_id: Book ID from create_book response
-            page_file_path: Path to page image file
+            s3_url: S3 presigned HTTPS URL
 
         Returns:
             Page ID from API response, or None if failed
         """
-        # API endpoint is /api/upload (not book-specific)
-        url = f"{self.base_url}/api/upload"
+        url = f"{self.base_url}/api/upload/from-s3"
 
         try:
-            self.logger.debug(f"Uploading page for book {book_id} from {page_file_path}")
+            self.logger.debug(f"Uploading page from S3 link for book {book_id}")
 
-            # Open file in binary mode
-            with open(page_file_path, 'rb') as f:
-                files = {
-                    'file': (f.name, f, 'application/octet-stream')
-                }
+            # Send JSON payload (NOT form-data)
+            payload = {
+                "bookId": book_id,
+                "imageUrls": [s3_url]  # Single-item array
+            }
 
-                # Include book_id in form data
-                data = {
-                    'book_id': book_id
-                }
-
-                response = requests.post(
-                    url,
-                    files=files,
-                    data=data,
-                    timeout=120  # Longer timeout for file upload
-                )
+            response = requests.post(
+                url,
+                json=payload,  # IMPORTANT: json parameter, not data or files
+                timeout=120
+            )
 
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success') and data.get('pages'):
                     page_id = data['pages'][0].get('id')
                     page_number = data['pages'][0].get('page_number')
-                    self.logger.debug(f"Successfully uploaded page (page_number={page_number}), ID: {page_id}")
+                    self.logger.debug(f"Successfully uploaded page from S3 (page_number={page_number}), ID: {page_id}")
                     return page_id
                 else:
                     self.logger.error(f"Upload succeeded but unexpected response format: {data}")
                     return None
             else:
-                self.logger.error(f"Failed to upload page. Status: {response.status_code}, Response: {response.text}")
+                self.logger.error(f"Failed to upload page from S3. Status: {response.status_code}, Response: {response.text}")
                 return None
 
-        except FileNotFoundError:
-            self.logger.error(f"Page file not found: {page_file_path}")
-            return None
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"Error uploading page: {e}")
+            self.logger.error(f"Error uploading page from S3: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Unexpected error uploading page: {e}")
+            self.logger.error(f"Unexpected error uploading page from S3: {e}")
             return None
+
+    def update_book_after_upload(self, book_id: str) -> bool:
+        """
+        Notify API that all pages for a book have been uploaded.
+        Called after all pages are successfully uploaded.
+
+        Args:
+            book_id: Book ID from create_book response
+
+        Returns:
+            True if successful, False otherwise
+        """
+        url = f"{self.base_url}/api/upload/update-book"
+
+        try:
+            self.logger.debug(f"Updating book after upload completion: {book_id}")
+
+            # Send JSON payload
+            payload = {
+                "bookId": book_id
+            }
+
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                self.logger.info(f"Successfully updated book {book_id} after upload")
+                return True
+            else:
+                self.logger.error(f"Failed to update book after upload. Status: {response.status_code}, Response: {response.text}")
+                return False
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Error updating book after upload: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Unexpected error updating book after upload: {e}")
+            return False
 
     def verify_book(self, book_id: str) -> Optional[Dict]:
         """

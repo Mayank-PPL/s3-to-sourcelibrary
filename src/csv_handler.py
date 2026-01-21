@@ -3,7 +3,7 @@
 import logging
 import zipfile
 from pathlib import Path
-from typing import Dict, Iterator
+from typing import Any, Dict, Iterator, Optional
 
 import pandas as pd
 
@@ -113,7 +113,7 @@ class CSVHandler:
             barcode = str(row['Picturae barcode']).strip()
 
             # Build metadata dictionary from specified columns
-            metadata = {
+            metadata: Dict[str, Optional[str]] = {
                 'picturae_barcode': barcode  # Always include barcode
             }
 
@@ -168,11 +168,33 @@ class CSVHandler:
             read_path = f"zip://{csv_filename}::{csv_path}"
             compression = None  # pandas handles this with the zip:// protocol
 
+        # Specify dtypes for only the columns we need to avoid pandas type inference overhead
+        # Using string literals for pandas dtype specification
+        dtype_spec = {
+            'Code': 'str',
+            'Filename': 'str',
+            'DAM Directory': 'str'
+        }
+
         # Read CSV in chunks
         try:
-            chunks = pd.read_csv(read_path, encoding='utf-8', compression=compression, chunksize=chunk_size)
+            chunks = pd.read_csv(
+                read_path,
+                encoding='utf-8',
+                compression=compression,
+                chunksize=chunk_size,
+                usecols=PAGES_CSV_COLUMNS,  # Only read columns we need
+                dtype=dtype_spec  # type: ignore[arg-type]
+            )
         except UnicodeDecodeError:
-            chunks = pd.read_csv(read_path, encoding='latin-1', compression=compression, chunksize=chunk_size)
+            chunks = pd.read_csv(
+                read_path,
+                encoding='latin-1',
+                compression=compression,
+                chunksize=chunk_size,
+                usecols=PAGES_CSV_COLUMNS,
+                dtype=dtype_spec  # type: ignore[arg-type]
+            )
 
         total_rows = 0
 
@@ -235,11 +257,28 @@ class CSVHandler:
             read_path = f"zip://{csv_filename}::{csv_path}"
             compression = None  # pandas handles this with the zip:// protocol
 
+        # Only read the Code column we need for counting
+        dtype_spec = {'Code': 'str'}
+
         # Read CSV in chunks
         try:
-            chunks = pd.read_csv(read_path, encoding='utf-8', compression=compression, chunksize=chunk_size)
+            chunks = pd.read_csv(
+                read_path,
+                encoding='utf-8',
+                compression=compression,
+                chunksize=chunk_size,
+                usecols=['Code'],
+                dtype=dtype_spec  # type: ignore[arg-type]
+            )
         except UnicodeDecodeError:
-            chunks = pd.read_csv(read_path, encoding='latin-1', compression=compression, chunksize=chunk_size)
+            chunks = pd.read_csv(
+                read_path,
+                encoding='latin-1',
+                compression=compression,
+                chunksize=chunk_size,
+                usecols=['Code'],
+                dtype=dtype_spec  # type: ignore[arg-type]
+            )
 
         for chunk in chunks:
             if 'Code' not in chunk.columns:

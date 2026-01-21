@@ -1,5 +1,6 @@
 """Migration orchestrator coordinating the entire migration workflow."""
 
+import json
 import logging
 import signal
 import sys
@@ -12,7 +13,7 @@ from src.api_client import APIClient
 from src.csv_handler import CSVHandler
 from src.s3_locator import S3Locator
 from src.state_manager import StateManager
-from src.utils import cleanup_temp_file, format_bytes
+from src.utils import format_bytes
 
 
 class MigrationOrchestrator:
@@ -90,8 +91,8 @@ class MigrationOrchestrator:
 
             # Step 3: Parse and index pages
             self.logger.info("Step 3/3: Indexing pages from CSV...")
+            self.logger.info("Note: S3 verification skipped during indexing for speed (will verify during migration)")
             pages_count = 0
-            total_size = 0
 
             for page_data in self.csv_handler.parse_pages_csv(self.config.pages_csv_path):
                 barcode = page_data['barcode']
@@ -99,21 +100,14 @@ class MigrationOrchestrator:
                 dam_directory = page_data['dam_directory']
                 sequence_order = page_data['sequence_order']
 
-                # Construct S3 key and check if file exists
-                s3_key, file_size = self.s3_locator.verify_and_get_file_info(dam_directory, filename)
+                # Construct expected S3 key WITHOUT verifying (no S3 API calls during indexing)
+                # Assume .jp2 extension; will try alternatives during migration if needed
+                s3_key = self.s3_locator.construct_s3_key(dam_directory, filename, '.jp2')
 
-                if s3_key:
-                    # File found
-                    self.state_manager.insert_page(
-                        barcode, filename, dam_directory, s3_key, sequence_order, file_size
-                    )
-                    total_size += file_size
-                else:
-                    # File not found - log as missing
-                    self.state_manager.add_missing_file(
-                        barcode, filename, dam_directory, "File not found in S3"
-                    )
-                    self.logger.warning(f"Missing file: {dam_directory}/{filename}")
+                # Store with unknown file size (will be determined during migration)
+                self.state_manager.insert_page(
+                    barcode, filename, dam_directory, s3_key, sequence_order, file_size_bytes=0
+                )
 
                 pages_count += 1
 
@@ -121,20 +115,21 @@ class MigrationOrchestrator:
                     self.logger.info(f"Indexed {pages_count} pages...")
 
             self.logger.info(f"Indexed {pages_count} pages total")
-            self.logger.info(f"Total size: {format_bytes(total_size)}")
+            self.logger.info("File sizes and existence will be verified during migration phase")
 
             # Update book total_pages counts
             self.logger.info("Updating book page counts...")
             for barcode, count in page_counts.items():
                 book = self.state_manager.get_book(barcode)
                 if book:
-                    self.state_manager.insert_book(barcode, eval(book['metadata_json']), total_pages=count)
+                    self.state_manager.insert_book(barcode, json.loads(book['metadata_json']), total_pages=count)
 
             # Mark indexing as completed
             self.state_manager.mark_indexing_completed()
             self.state_manager.set_metadata("total_books_indexed", str(books_count))
             self.state_manager.set_metadata("total_pages_indexed", str(pages_count))
-            self.state_manager.set_metadata("total_size_bytes", str(total_size))
+            # Size will be determined during migration (set to 0 for now)
+            self.state_manager.set_metadata("total_size_bytes", "0")
 
             missing_count = self.state_manager.get_missing_files_count()
             if missing_count > 0:
@@ -221,7 +216,8 @@ class MigrationOrchestrator:
             book: Book record from database
         """
         barcode = book['picturae_barcode']
-        self.logger.info(f"Processing book: {barcode}")
+        title = json.loads(book['metadata_json']).get('Title', 'Untitled')
+        self.logger.info(f"Processing book: {barcode}, {title}")
 
         try:
             # Check if book already created
@@ -229,7 +225,6 @@ class MigrationOrchestrator:
 
             if not api_book_id:
                 # Create book via API
-                import json
                 metadata = json.loads(book['metadata_json'])
                 api_book_id = self.api_client.create_book(metadata)
 
@@ -239,15 +234,20 @@ class MigrationOrchestrator:
                 # Update database with API book ID
                 self.state_manager.update_book_api_id(barcode, api_book_id)
 
-            # Get pending pages for this book (ordered by sequence)
-            pages = self.state_manager.get_pages_for_book(barcode, status='pending')
+            # Get pending AND failed pages for this book (to support retry on restart)
+            pending_pages = self.state_manager.get_pages_for_book(barcode, status='pending')
+            failed_pages = self.state_manager.get_pages_for_book(barcode, status='failed')
+
+            # Combine and sort by sequence_order to maintain correct ordering
+            pages = pending_pages + failed_pages
+            pages = sorted(pages, key=lambda p: p['sequence_order'])
 
             if not pages:
-                self.logger.info(f"No pending pages for book {barcode}, marking as completed")
+                self.logger.info(f"No pending/failed pages for book {barcode}, marking as completed")
                 self.state_manager.update_book_status(barcode, 'completed')
                 return
 
-            self.logger.info(f"Uploading {len(pages)} pages for book {barcode} (sequential)")
+            self.logger.info(f"Uploading {len(pages)} pages for book {barcode} (sequential, including {len(failed_pages)} retries)")
 
             # Upload pages ONE AT A TIME in sequence order
             for page in pages:
@@ -257,12 +257,22 @@ class MigrationOrchestrator:
                 self._upload_single_page(barcode, api_book_id, page)
 
             # Mark book as completed if all pages uploaded
-            remaining_pages = self.state_manager.get_pages_for_book(barcode, status='pending')
-            if not remaining_pages:
-                self.state_manager.update_book_status(barcode, 'completed')
-                self.logger.info(f"Book {barcode} migration completed")
+            # Check uploaded count against total pages (future-proof for any status types)
+            uploaded_count = self.state_manager.count_uploaded_pages_for_book(barcode)
+            total_pages = book['total_pages']
+
+            if uploaded_count == total_pages:
+                # All pages successfully uploaded
+                update_success = self.api_client.update_book_after_upload(api_book_id)
+                if update_success:
+                    self.state_manager.update_book_status(barcode, 'completed')
+                    self.logger.info(f"Book {barcode} migration completed: {uploaded_count}/{total_pages} pages uploaded, API notified")
+                else:
+                    self.logger.warning(f"Book {barcode} pages uploaded but failed to notify API")
+                    self.state_manager.update_book_status(barcode, 'completed')  # Still mark as completed
             else:
-                self.logger.warning(f"Book {barcode} has {len(remaining_pages)} pending pages remaining")
+                remaining = total_pages - uploaded_count
+                self.logger.warning(f"Book {barcode} incomplete: {uploaded_count}/{total_pages} pages uploaded, {remaining} remaining")
 
         except Exception as e:
             self.logger.error(f"Error migrating book {barcode}: {e}", exc_info=True)
@@ -270,7 +280,13 @@ class MigrationOrchestrator:
 
     def _upload_single_page(self, barcode: str, api_book_id: str, page: dict) -> None:
         """
-        Upload a single page: download from S3, upload to API, delete temp file.
+        Upload a single page: validate S3 file, generate presigned URL, send to API.
+
+        New flow (no temp files):
+        1. Validate S3 file exists (with extension fallback)
+        2. Generate presigned URL
+        3. Send presigned URL to API via JSON payload
+        4. Update database
 
         Args:
             barcode: Book barcode
@@ -280,34 +296,47 @@ class MigrationOrchestrator:
         page_id = page['id']
         s3_key = page['s3_key']
         filename = page['filename']
-
-        temp_file = None
+        dam_directory = page['dam_directory']
 
         try:
-            # Step 1: Download from S3
-            temp_file = self.s3_locator.download_file(s3_key, barcode, filename)
+            # Step 1: Validate S3 file exists
+            # Try exact key first (from indexing with .jp2 assumption)
+            exists, file_size = self.s3_locator.check_file_exists(s3_key)
 
-            if not temp_file:
-                raise Exception(f"Failed to download page from S3: {s3_key}")
+            if not exists:
+                # Fallback: try different extensions
+                self.logger.debug(f"File not found at {s3_key}, trying alternative extensions...")
+                s3_key_found, file_size, ext_found = self.s3_locator.find_file_with_extension(
+                    dam_directory, filename
+                )
 
-            # Step 2: Upload to API
-            api_page_id = self.api_client.upload_page(api_book_id, temp_file)
+                if not s3_key_found:
+                    raise Exception(f"S3 file not found: {s3_key}")
+
+                s3_key = s3_key_found
+                self.logger.debug(f"Found file with extension {ext_found}: {s3_key} ({file_size} bytes)")
+
+            # Step 2: Generate presigned URL
+            presigned_url = self.s3_locator.generate_presigned_url(s3_key)
+
+            if not presigned_url:
+                raise Exception(f"Failed to generate presigned URL for: {s3_key}")
+
+            # Step 3: Upload to API using S3 presigned URL
+            api_page_id = self.api_client.upload_page_from_s3(api_book_id, presigned_url)
 
             if not api_page_id:
-                raise Exception("Failed to upload page to API")
+                raise Exception("Failed to upload page to API via S3 link")
 
-            # Step 3: Update database
+            # Step 4: Update database with success
             self.state_manager.update_page_uploaded(page_id, api_page_id)
             self.state_manager.increment_uploaded_pages(barcode)
 
-        except Exception as e:
-            self.logger.error(f"Error uploading page {page_id}: {e}")
-            self.state_manager.update_page_failed(page_id, str(e))
+            self.logger.info(f"✓ Uploaded page {filename} (no temp file needed)")
 
-        finally:
-            # Step 4: Cleanup temp file
-            if temp_file:
-                cleanup_temp_file(temp_file, self.logger)
+        except Exception as e:
+            self.logger.error(f"Error uploading page {page_id} (barcode: {barcode}, filename: {filename}): {e}")
+            self.state_manager.update_page_failed(page_id, str(e))
 
     def show_status(self) -> None:
         """Show current migration status and statistics."""

@@ -84,6 +84,29 @@ class S3Locator:
                 self.logger.warning(f"Error checking S3 file {s3_key}: {e}")
                 return False, 0
 
+    def generate_presigned_url(self, s3_key: str, expiration: int = 3600) -> Optional[str]:
+        """
+        Generate presigned HTTPS URL for S3 object.
+
+        Args:
+            s3_key: S3 object key
+            expiration: URL expiration in seconds (default: 3600 = 1 hour)
+
+        Returns:
+            Presigned URL string or None if failed
+        """
+        try:
+            url = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': self.bucket_name, 'Key': s3_key},
+                ExpiresIn=expiration
+            )
+            self.logger.debug(f"Generated presigned URL for {s3_key} (expires in {expiration}s)")
+            return url
+        except ClientError as e:
+            self.logger.error(f"Failed to generate presigned URL for {s3_key}: {e}")
+            return None
+
     def find_file_with_extension(self, dam_directory: str, filename: str) -> Tuple[Optional[str], int, Optional[str]]:
         """
         Find file by trying multiple extensions.

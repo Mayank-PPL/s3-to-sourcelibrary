@@ -251,6 +251,23 @@ class StateManager:
                 WHERE id = ?
             """, (page_id,))
 
+    def count_uploaded_pages_for_book(self, barcode: str) -> int:
+        """
+        Count successfully uploaded pages for a specific book.
+
+        Args:
+            barcode: Picturae barcode
+
+        Returns:
+            Number of uploaded pages
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM pages
+                WHERE picturae_barcode = ? AND upload_status = 'uploaded'
+            """, (barcode,))
+            return cursor.fetchone()[0]
+
     # === Statistics ===
 
     def get_migration_statistics(self) -> Dict:
