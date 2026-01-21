@@ -62,7 +62,12 @@ class APIClient:
             "published": metadata.get('Year of publication') or 'Unknown',
             "publisher": metadata.get('Publisher'),
             "place_of_publication": metadata.get('Place of publication'),
-            "printer": metadata.get('Printer'),            
+            "printer": metadata.get('Printer'),
+            "image_source": {
+                "provider": 'efm',
+                "provider_name": "Embassy of the Free Mind",
+                "license": "publicdomain"
+            }
         }
 
         try:
