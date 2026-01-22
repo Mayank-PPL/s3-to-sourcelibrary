@@ -21,8 +21,6 @@ class Config:
 
     # API Configuration
     api_base_url: str
-    book_create_endpoint: str
-    page_upload_endpoint: str
 
     # CSV Configuration
     books_csv_path: str
@@ -32,6 +30,7 @@ class Config:
     book_workers: int
     max_retries: int
     retry_backoff: float
+    request_delay: float  # Delay in seconds between consecutive API requests
 
     # Paths
     temp_dir: str
@@ -79,9 +78,7 @@ def load_config(env_file: str = ".env") -> Config:
         s3_base_prefix=get_optional("S3_BASE_PREFIX", "collection/export_dam_files/jp2"),
 
         # API
-        api_base_url=get_required("API_BASE_URL"),
-        book_create_endpoint=get_optional("BOOK_CREATE_ENDPOINT", "/api/books"),
-        page_upload_endpoint=get_optional("PAGE_UPLOAD_ENDPOINT", "/api/upload"),
+        api_base_url=get_required("API_BASE_URL"),        
 
         # CSV
         books_csv_path=get_optional("BOOKS_CSV_PATH", "./data/csv/ScannedBooks.csv"),
@@ -91,6 +88,7 @@ def load_config(env_file: str = ".env") -> Config:
         book_workers=int(get_optional("BOOK_WORKERS", "1")),
         max_retries=int(get_optional("MAX_RETRIES", "3")),
         retry_backoff=float(get_optional("RETRY_BACKOFF", "2.0")),
+        request_delay=float(get_optional("REQUEST_DELAY", "1.0")),  # 1 second delay between requests
 
         # Paths
         temp_dir=get_optional("TEMP_DIR", "./temp"),

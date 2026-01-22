@@ -21,9 +21,7 @@ class APIClient:
         """
         self.config = config
         self.logger = logger
-        self.base_url = config.api_base_url.rstrip('/')
-        self.book_create_endpoint = config.book_create_endpoint
-        self.page_upload_endpoint = config.page_upload_endpoint
+        self.base_url = config.api_base_url.rstrip('/')        
         self.max_retries = config.max_retries
 
     def _get_retry_decorator(self):
@@ -52,7 +50,7 @@ class APIClient:
         Returns:
             Book ID from API response, or None if failed
         """
-        url = f"{self.base_url}{self.book_create_endpoint}"
+        url = f"{self.base_url}/api/books"
 
         # Map metadata fields to API expected format
         payload = {
@@ -197,7 +195,7 @@ class APIClient:
         Returns:
             Book details dictionary or None if not found
         """
-        url = f"{self.base_url}{self.book_create_endpoint}/{book_id}"
+        url = f"{self.base_url}/api/books/{book_id}"
 
         try:
             response = requests.get(url, timeout=30)

@@ -4,6 +4,7 @@ import json
 import logging
 import signal
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -167,7 +168,7 @@ class MigrationOrchestrator:
         books = self.state_manager.get_all_books(limit=limit)
 
         # Filter to only pending books
-        pending_books = [b for b in books if b['migration_status'] in ['pending', 'in_progress', 'failed']]
+        pending_books = [b for b in books if b['migration_status'] in ['pending', 'in_progress']]
 
         if not pending_books:
             self.logger.info("No books to migrate. All books completed.")
@@ -234,12 +235,11 @@ class MigrationOrchestrator:
                 # Update database with API book ID
                 self.state_manager.update_book_api_id(barcode, api_book_id)
 
-            # Get pending AND failed pages for this book (to support retry on restart)
-            pending_pages = self.state_manager.get_pages_for_book(barcode, status='pending')
-            failed_pages = self.state_manager.get_pages_for_book(barcode, status='failed')
+            # Get pending pages for this book (to support retry on restart)
+            pending_pages = self.state_manager.get_pages_for_book(barcode, status='pending')            
 
             # Combine and sort by sequence_order to maintain correct ordering
-            pages = pending_pages + failed_pages
+            pages = pending_pages
             pages = sorted(pages, key=lambda p: p['sequence_order'])
 
             if not pages:
@@ -247,14 +247,18 @@ class MigrationOrchestrator:
                 self.state_manager.update_book_status(barcode, 'completed')
                 return
 
-            self.logger.info(f"Uploading {len(pages)} pages for book {barcode} (sequential, including {len(failed_pages)} retries)")
+            self.logger.info(f"Uploading {len(pages)} pages for book {barcode} (sequential)")
 
             # Upload pages ONE AT A TIME in sequence order
-            for page in pages:
+            for idx, page in enumerate(pages):
                 if self.shutdown_requested:
                     break
 
                 self._upload_single_page(barcode, api_book_id, page)
+
+                # Add delay between requests to avoid rate limiting (skip delay after last page)
+                if idx < len(pages) - 1 and self.config.request_delay > 0:
+                    time.sleep(self.config.request_delay)
 
             # Mark book as completed if all pages uploaded
             # Check uploaded count against total pages (future-proof for any status types)
