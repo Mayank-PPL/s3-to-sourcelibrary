@@ -1,5 +1,6 @@
 """Migration orchestrator coordinating the entire migration workflow."""
 
+import asyncio
 import json
 import logging
 import signal
@@ -213,6 +214,18 @@ class MigrationOrchestrator:
         """
         Migrate a single book: create book and upload all pages sequentially.
 
+        This is a synchronous wrapper that runs async code.
+
+        Args:
+            book: Book record from database
+        """
+        # Run async code in a new event loop
+        asyncio.run(self._migrate_single_book_async(book))
+
+    async def _migrate_single_book_async(self, book: dict) -> None:
+        """
+        Migrate a single book: create book and upload all pages sequentially (async).
+
         Args:
             book: Book record from database
         """
@@ -227,7 +240,7 @@ class MigrationOrchestrator:
             if not api_book_id:
                 # Create book via API
                 metadata = json.loads(book['metadata_json'])
-                api_book_id = self.api_client.create_book(metadata)
+                api_book_id = await self.api_client.create_book(metadata)
 
                 if not api_book_id:
                     raise Exception("Failed to create book via API")
@@ -236,7 +249,7 @@ class MigrationOrchestrator:
                 self.state_manager.update_book_api_id(barcode, api_book_id)
 
             # Get pending pages for this book (to support retry on restart)
-            pending_pages = self.state_manager.get_pages_for_book(barcode, status='pending')            
+            pending_pages = self.state_manager.get_pages_for_book(barcode, status='pending')
 
             # Combine and sort by sequence_order to maintain correct ordering
             pages = pending_pages
@@ -254,11 +267,11 @@ class MigrationOrchestrator:
                 if self.shutdown_requested:
                     break
 
-                self._upload_single_page(barcode, api_book_id, page)
+                await self._upload_single_page_async(barcode, api_book_id, page)
 
                 # Add delay between requests to avoid rate limiting (skip delay after last page)
                 if idx < len(pages) - 1 and self.config.request_delay > 0:
-                    time.sleep(self.config.request_delay)
+                    await asyncio.sleep(self.config.request_delay)
 
             # Mark book as completed if all pages uploaded
             # Check uploaded count against total pages (future-proof for any status types)
@@ -267,7 +280,7 @@ class MigrationOrchestrator:
 
             if uploaded_count == total_pages:
                 # All pages successfully uploaded
-                update_success = self.api_client.update_book_after_upload(api_book_id)
+                update_success = await self.api_client.update_book_after_upload(api_book_id)
                 if update_success:
                     self.state_manager.update_book_status(barcode, 'completed')
                     self.logger.info(f"Book {barcode} migration completed: {uploaded_count}/{total_pages} pages uploaded, API notified")
@@ -282,9 +295,9 @@ class MigrationOrchestrator:
             self.logger.error(f"Error migrating book {barcode}: {e}", exc_info=True)
             self.state_manager.update_book_status(barcode, 'failed', str(e))
 
-    def _upload_single_page(self, barcode: str, api_book_id: str, page: dict) -> None:
+    async def _upload_single_page_async(self, barcode: str, api_book_id: str, page: dict) -> None:
         """
-        Upload a single page: validate S3 file, generate presigned URL, send to API.
+        Upload a single page: validate S3 file, generate presigned URL, send to API (async).
 
         New flow (no temp files):
         1. Validate S3 file exists (with extension fallback)
@@ -301,16 +314,17 @@ class MigrationOrchestrator:
         s3_key = page['s3_key']
         filename = page['filename']
         dam_directory = page['dam_directory']
+        presigned_url = None
 
         try:
             # Step 1: Validate S3 file exists
             # Try exact key first (from indexing with .jp2 assumption)
-            exists, file_size = self.s3_locator.check_file_exists(s3_key)
+            exists, file_size = await self.s3_locator.check_file_exists(s3_key)
 
             if not exists:
                 # Fallback: try different extensions
                 self.logger.debug(f"File not found at {s3_key}, trying alternative extensions...")
-                s3_key_found, file_size, ext_found = self.s3_locator.find_file_with_extension(
+                s3_key_found, file_size, ext_found = await self.s3_locator.find_file_with_extension(
                     dam_directory, filename
                 )
 
@@ -321,13 +335,13 @@ class MigrationOrchestrator:
                 self.logger.debug(f"Found file with extension {ext_found}: {s3_key} ({file_size} bytes)")
 
             # Step 2: Generate presigned URL
-            presigned_url = self.s3_locator.generate_presigned_url(s3_key)
+            presigned_url = await self.s3_locator.generate_presigned_url(s3_key)
 
             if not presigned_url:
                 raise Exception(f"Failed to generate presigned URL for: {s3_key}")
 
             # Step 3: Upload to API using S3 presigned URL
-            api_page_id = self.api_client.upload_page_from_s3(api_book_id, presigned_url)
+            api_page_id = await self.api_client.upload_page_from_s3(api_book_id, presigned_url)
 
             if not api_page_id:
                 raise Exception("Failed to upload page to API via S3 link")
@@ -339,7 +353,9 @@ class MigrationOrchestrator:
             self.logger.info(f"✓ Uploaded page {filename} (no temp file needed)")
 
         except Exception as e:
-            self.logger.error(f"Error uploading page {page_id} (barcode: {barcode}, filename: {filename}): {e}")
+            # Log S3 URL if available to help with debugging
+            s3_info = f", S3 URL: {presigned_url}" if presigned_url else ""
+            self.logger.error(f"Error uploading page {page_id} (barcode: {barcode}, filename: {filename}): {e}{s3_info}")
             self.state_manager.update_page_failed(page_id, str(e))
 
     def show_status(self) -> None:

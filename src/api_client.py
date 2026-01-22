@@ -1,10 +1,11 @@
 """API client for book creation and page upload."""
 
+import asyncio
 import logging
 import time
 from typing import Dict, List, Optional
 
-import requests
+import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
@@ -29,13 +30,13 @@ class APIClient:
         return retry(
             stop=stop_after_attempt(self.max_retries),
             wait=wait_exponential(multiplier=self.config.retry_backoff, min=1, max=60),
-            retry=retry_if_exception_type((requests.exceptions.RequestException, requests.exceptions.Timeout)),
+            retry=retry_if_exception_type((aiohttp.ClientError, aiohttp.ServerTimeoutError)),
             reraise=True
         )
 
-    def create_book(self, metadata: Dict) -> Optional[str]:
+    async def create_book(self, metadata: Dict, max_retries: int = 3) -> Optional[str]:
         """
-        Create a book via API.
+        Create a book via API with retry logic.
 
         Expected API response format:
         {
@@ -46,9 +47,10 @@ class APIClient:
 
         Args:
             metadata: Book metadata dictionary
+            max_retries: Maximum number of retry attempts (default: 3)
 
         Returns:
-            Book ID from API response, or None if failed
+            Book ID from API response, or None if failed after all retries
         """
         url = f"{self.base_url}/api/books"
 
@@ -68,144 +70,254 @@ class APIClient:
             }
         }
 
-        try:
-            self.logger.info(f"Creating book: {metadata.get('picturae_barcode')}")
-            self.logger.debug(f"POST {url} with payload: {payload}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    self.logger.info(f"Retry attempt {attempt}/{max_retries} for creating book")
 
-            response = requests.post(
-                url,
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
+                self.logger.info(f"Creating book: {metadata.get('picturae_barcode')} (attempt {attempt}/{max_retries})")
+                self.logger.debug(f"POST {url} with payload: {payload}")
 
-            if response.status_code == 201:
-                data = response.json()
-                book_id = data.get('id')
-                self.logger.info(f"Successfully created book with ID: {book_id}")
-                return book_id
-            else:
-                self.logger.error(f"Failed to create book. Status: {response.status_code}, Response: {response.text}")
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers={'Content-Type': 'application/json'}
+                    ) as response:
+                        if response.status == 201:
+                            data = await response.json()
+                            book_id = data.get('id')
+                            if attempt > 1:
+                                self.logger.info(f"Successfully created book on attempt {attempt}/{max_retries}")
+                            self.logger.info(f"Successfully created book with ID: {book_id}")
+                            return book_id
+                        else:
+                            text = await response.text()
+                            self.logger.error(f"Failed to create book (attempt {attempt}/{max_retries}). Status: {response.status}, Response: {text}")
+
+                            # Check if we should retry
+                            if attempt < max_retries:
+                                wait_time = 2 ** attempt
+                                self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                            else:
+                                return None
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                self.logger.error(f"Error creating book (attempt {attempt}/{max_retries}): {e}")
+
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    return None
+
+            except Exception as e:
+                self.logger.error(f"Unexpected error creating book (attempt {attempt}/{max_retries}): {e}")
                 return None
 
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Error creating book: {e}")
-            return None
+        return None
             
 
-    def upload_page_from_s3(self, book_id: str, s3_url: str) -> Optional[str]:
+    async def upload_page_from_s3(self, book_id: str, s3_url: str, max_retries: int = 3) -> Optional[str]:
         """
-        Upload page image from S3 presigned URL.
+        Upload page image from S3 presigned URL with retry logic.
         API downloads directly from S3 without intermediate temp file.
 
         Args:
             book_id: Book ID from create_book response
             s3_url: S3 presigned HTTPS URL
+            max_retries: Maximum number of retry attempts (default: 3)
 
         Returns:
-            Page ID from API response, or None if failed
+            Page ID from API response, or None if failed after all retries
         """
         url = f"{self.base_url}/api/upload/from-s3"
 
-        try:
-            self.logger.debug(f"Uploading page from S3 link for book {book_id}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    self.logger.info(f"Retry attempt {attempt}/{max_retries} for uploading page from S3")
 
-            # Send JSON payload (NOT form-data)
-            payload = {
-                "bookId": book_id,
-                "imageUrls": [s3_url]  # Single-item array
-            }
+                self.logger.debug(f"Uploading page from S3 link for book {book_id} (attempt {attempt}/{max_retries})")
 
-            response = requests.post(
-                url,
-                json=payload,  # IMPORTANT: json parameter, not data or files
-                timeout=120
-            )
+                # Send JSON payload (NOT form-data)
+                payload = {
+                    "bookId": book_id,
+                    "imageUrls": [s3_url]  # Single-item array
+                }
 
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success') and data.get('pages'):
-                    page_id = data['pages'][0].get('id')
-                    page_number = data['pages'][0].get('page_number')
-                    self.logger.debug(f"Successfully uploaded page from S3 (page_number={page_number}), ID: {page_id}")
-                    return page_id
+                timeout = aiohttp.ClientTimeout(total=120)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, json=payload) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if data.get('success') and data.get('pages'):
+                                page_id = data['pages'][0].get('id')
+                                page_number = data['pages'][0].get('page_number')
+                                if attempt > 1:
+                                    self.logger.info(f"Successfully uploaded page from S3 on attempt {attempt}/{max_retries}")
+                                self.logger.debug(f"Successfully uploaded page from S3 (page_number={page_number}), ID: {page_id}")
+                                return page_id
+                            else:
+                                self.logger.error(f"Upload succeeded but unexpected response format: {data}")
+                                # Don't retry for malformed responses
+                                return None
+                        else:
+                            text = await response.text()
+                            self.logger.error(f"Failed to upload page from S3 (attempt {attempt}/{max_retries}). Status: {response.status}, Response: {text}")
+
+                            # Check if we should retry
+                            if attempt < max_retries:
+                                # Calculate exponential backoff: 2^attempt seconds
+                                wait_time = 2 ** attempt
+                                self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                            else:
+                                # All retries exhausted
+                                return None
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                self.logger.error(f"Error uploading page from S3 (attempt {attempt}/{max_retries}): {e}")
+
+                # Check if we should retry
+                if attempt < max_retries:
+                    # Calculate exponential backoff: 2^attempt seconds
+                    wait_time = 2 ** attempt
+                    self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                    await asyncio.sleep(wait_time)
+                    continue
                 else:
-                    self.logger.error(f"Upload succeeded but unexpected response format: {data}")
+                    # All retries exhausted
                     return None
-            else:
-                self.logger.error(f"Failed to upload page from S3. Status: {response.status_code}, Response: {response.text}")
+
+            except Exception as e:
+                self.logger.error(f"Unexpected error uploading page from S3 (attempt {attempt}/{max_retries}): {e}")
+                # Don't retry for unexpected errors
                 return None
 
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Error uploading page from S3: {e}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Unexpected error uploading page from S3: {e}")
-            return None
+        return None
 
-    def update_book_after_upload(self, book_id: str) -> bool:
+    async def update_book_after_upload(self, book_id: str, max_retries: int = 3) -> bool:
         """
-        Notify API that all pages for a book have been uploaded.
+        Notify API that all pages for a book have been uploaded with retry logic.
         Called after all pages are successfully uploaded.
 
         Args:
             book_id: Book ID from create_book response
+            max_retries: Maximum number of retry attempts (default: 3)
 
         Returns:
-            True if successful, False otherwise
+            True if successful, False if failed after all retries
         """
         url = f"{self.base_url}/api/upload/update-book"
 
-        try:
-            self.logger.debug(f"Updating book after upload completion: {book_id}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    self.logger.info(f"Retry attempt {attempt}/{max_retries} for updating book after upload")
 
-            # Send JSON payload
-            payload = {
-                "bookId": book_id
-            }
+                self.logger.debug(f"Updating book after upload completion: {book_id} (attempt {attempt}/{max_retries})")
 
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=30
-            )
+                # Send JSON payload
+                payload = {
+                    "bookId": book_id
+                }
 
-            if response.status_code == 200:
-                self.logger.info(f"Successfully updated book {book_id} after upload")
-                return True
-            else:
-                self.logger.error(f"Failed to update book after upload. Status: {response.status_code}, Response: {response.text}")
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, json=payload) as response:
+                        if response.status == 200:
+                            if attempt > 1:
+                                self.logger.info(f"Successfully updated book on attempt {attempt}/{max_retries}")
+                            self.logger.info(f"Successfully updated book {book_id} after upload")
+                            return True
+                        else:
+                            text = await response.text()
+                            self.logger.error(f"Failed to update book after upload (attempt {attempt}/{max_retries}). Status: {response.status}, Response: {text}")
+
+                            if attempt < max_retries:
+                                wait_time = 2 ** attempt
+                                self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                            else:
+                                return False
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                self.logger.error(f"Error updating book after upload (attempt {attempt}/{max_retries}): {e}")
+
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    return False
+
+            except Exception as e:
+                self.logger.error(f"Unexpected error updating book after upload (attempt {attempt}/{max_retries}): {e}")
                 return False
 
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Error updating book after upload: {e}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Unexpected error updating book after upload: {e}")
-            return False
+        return False
 
-    def verify_book(self, book_id: str) -> Optional[Dict]:
+    async def verify_book(self, book_id: str, max_retries: int = 3) -> Optional[Dict]:
         """
-        Verify book exists and get its details.
+        Verify book exists and get its details with retry logic.
         Used for data integrity verification after migration.
 
         Args:
             book_id: Book ID to verify
+            max_retries: Maximum number of retry attempts (default: 3)
 
         Returns:
-            Book details dictionary or None if not found
+            Book details dictionary or None if not found after all retries
         """
         url = f"{self.base_url}/api/books/{book_id}"
 
-        try:
-            response = requests.get(url, timeout=30)
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    self.logger.info(f"Retry attempt {attempt}/{max_retries} for verifying book")
 
-            if response.status_code == 200:
-                return response.json()
-            else:
-                self.logger.warning(f"Book {book_id} verification failed. Status: {response.status_code}")
+                self.logger.debug(f"Verifying book {book_id} (attempt {attempt}/{max_retries})")
+
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            if attempt > 1:
+                                self.logger.info(f"Successfully verified book on attempt {attempt}/{max_retries}")
+                            return await response.json()
+                        else:
+                            self.logger.warning(f"Book {book_id} verification failed (attempt {attempt}/{max_retries}). Status: {response.status}")
+
+                            if attempt < max_retries:
+                                wait_time = 2 ** attempt
+                                self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                            else:
+                                return None
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                self.logger.error(f"Error verifying book {book_id} (attempt {attempt}/{max_retries}): {e}")
+
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    self.logger.info(f"Waiting {wait_time} seconds before retry...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    return None
+
+            except Exception as e:
+                self.logger.error(f"Unexpected error verifying book {book_id} (attempt {attempt}/{max_retries}): {e}")
                 return None
 
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Error verifying book {book_id}: {e}")
-            return None
+        return None

@@ -3,7 +3,8 @@
 import logging
 from typing import List, Optional, Tuple
 
-import boto3
+import aioboto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from src.utils import cleanup_temp_file, get_temp_filepath
@@ -11,6 +12,9 @@ from src.utils import cleanup_temp_file, get_temp_filepath
 
 # Common image file extensions to try
 IMAGE_EXTENSIONS = ['.jp2', '.jpg', '.jpeg', '.tif', '.tiff', '.png']
+
+# S3 operation timeout (3 minutes)
+S3_TIMEOUT = 180
 
 
 class S3Locator:
@@ -27,9 +31,15 @@ class S3Locator:
         self.config = config
         self.logger = logger
 
-        # Initialize S3 client
-        self.s3_client = boto3.client(
-            's3',
+        # Configure boto3 with 3-minute timeout
+        self.boto_config = Config(
+            connect_timeout=S3_TIMEOUT,
+            read_timeout=S3_TIMEOUT,
+            retries={'max_attempts': 3}
+        )
+
+        # Initialize aioboto3 session
+        self.session = aioboto3.Session(
             aws_access_key_id=config.aws_access_key_id,
             aws_secret_access_key=config.aws_secret_access_key,
             region_name=config.aws_region
@@ -61,7 +71,7 @@ class S3Locator:
 
         return s3_key
 
-    def check_file_exists(self, s3_key: str) -> Tuple[bool, int]:
+    async def check_file_exists(self, s3_key: str) -> Tuple[bool, int]:
         """
         Check if file exists in S3 and get its size.
 
@@ -72,9 +82,12 @@ class S3Locator:
             Tuple of (exists: bool, size_bytes: int)
         """
         try:
-            response = self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
-            size_bytes = response.get('ContentLength', 0)
-            return True, size_bytes
+            # Use resource() with timeout configuration
+            async with self.session.resource('s3', config=self.boto_config) as s3:
+                obj = await s3.Object(self.bucket_name, s3_key)
+                await obj.load()
+                size_bytes = obj.content_length
+                return True, size_bytes
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', '')
             if error_code == '404':
@@ -83,8 +96,11 @@ class S3Locator:
                 # Other error
                 self.logger.warning(f"Error checking S3 file {s3_key}: {e}")
                 return False, 0
+        except Exception as e:
+            self.logger.warning(f"Error checking S3 file {s3_key}: {e}")
+            return False, 0
 
-    def generate_presigned_url(self, s3_key: str, expiration: int = 3600) -> Optional[str]:
+    async def generate_presigned_url(self, s3_key: str, expiration: int = 3600) -> Optional[str]:
         """
         Generate presigned HTTPS URL for S3 object.
 
@@ -96,18 +112,24 @@ class S3Locator:
             Presigned URL string or None if failed
         """
         try:
-            url = self.s3_client.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': self.bucket_name, 'Key': s3_key},
-                ExpiresIn=expiration
-            )
-            self.logger.debug(f"Generated presigned URL for {s3_key} (expires in {expiration}s)")
-            return url
+            # Use resource for async context with timeout configuration
+            async with self.session.resource('s3', config=self.boto_config) as s3:
+                # generate_presigned_url is available on the client
+                url = await s3.meta.client.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': self.bucket_name, 'Key': s3_key},
+                    ExpiresIn=expiration
+                )
+                self.logger.debug(f"Generated presigned URL for {s3_key} (expires in {expiration}s)")
+                return url
         except ClientError as e:
             self.logger.error(f"Failed to generate presigned URL for {s3_key}: {e}")
             return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error generating presigned URL for {s3_key}: {e}")
+            return None
 
-    def find_file_with_extension(self, dam_directory: str, filename: str) -> Tuple[Optional[str], int, Optional[str]]:
+    async def find_file_with_extension(self, dam_directory: str, filename: str) -> Tuple[Optional[str], int, Optional[str]]:
         """
         Find file by trying multiple extensions.
 
@@ -121,7 +143,7 @@ class S3Locator:
         # Try each extension
         for ext in IMAGE_EXTENSIONS:
             s3_key = self.construct_s3_key(dam_directory, filename, ext)
-            exists, size_bytes = self.check_file_exists(s3_key)
+            exists, size_bytes = await self.check_file_exists(s3_key)
 
             if exists:
                 self.logger.debug(f"Found file with extension {ext}: {s3_key}")
@@ -130,7 +152,7 @@ class S3Locator:
         # File not found with any extension
         return None, 0, None
 
-    def download_file(self, s3_key: str, barcode: str, filename: str) -> Optional[str]:
+    async def download_file(self, s3_key: str, barcode: str, filename: str) -> Optional[str]:
         """
         Download file from S3 to temp directory.
 
@@ -150,7 +172,9 @@ class S3Locator:
 
         try:
             self.logger.debug(f"Downloading {s3_key} to {temp_filepath}")
-            self.s3_client.download_file(self.bucket_name, s3_key, temp_filepath)
+            async with self.session.resource('s3', config=self.boto_config) as s3:
+                obj = await s3.Object(self.bucket_name, s3_key)
+                await obj.download_file(temp_filepath)
             return temp_filepath
         except ClientError as e:
             self.logger.error(f"Failed to download {s3_key}: {e}")
@@ -162,7 +186,7 @@ class S3Locator:
             cleanup_temp_file(temp_filepath, self.logger)
             return None
 
-    def verify_and_get_file_info(self, dam_directory: str, filename: str) -> Tuple[Optional[str], int]:
+    async def verify_and_get_file_info(self, dam_directory: str, filename: str) -> Tuple[Optional[str], int]:
         """
         Verify file exists and get info during indexing.
         Tries multiple extensions since filename doesn't include extension.
@@ -175,7 +199,7 @@ class S3Locator:
             Tuple of (s3_key or None, file_size_bytes)
         """
         # Try to find file with any of the common extensions
-        s3_key, size_bytes, ext_found = self.find_file_with_extension(dam_directory, filename)
+        s3_key, size_bytes, ext_found = await self.find_file_with_extension(dam_directory, filename)
 
         if s3_key:
             return s3_key, size_bytes
