@@ -43,6 +43,11 @@ class StateManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
+            # Enable WAL mode for better concurrency with multiple workers
+            cursor.execute("PRAGMA journal_mode = WAL")
+            cursor.execute("PRAGMA busy_timeout = 5000")  # 5 second wait before error
+            cursor.execute("PRAGMA synchronous = NORMAL")  # Faster with WAL, still safe
+
             # Books table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS books (
@@ -184,6 +189,29 @@ class StateManager:
                 cursor = conn.execute("SELECT * FROM books ORDER BY picturae_barcode LIMIT ?", (limit,))
             else:
                 cursor = conn.execute("SELECT * FROM books ORDER BY picturae_barcode")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_books_by_status(self, statuses: List[str], limit: Optional[int] = None) -> List[Dict]:
+        """
+        Get books filtered by status.
+
+        Args:
+            statuses: List of statuses to filter by (e.g., ['pending', 'in_progress'])
+            limit: Optional limit on number of books to return
+
+        Returns:
+            List of book records matching the given statuses
+        """
+        with self.get_connection() as conn:
+            placeholders = ','.join('?' * len(statuses))
+            query = f"SELECT * FROM books WHERE migration_status IN ({placeholders}) ORDER BY picturae_barcode"
+
+            if limit:
+                query += " LIMIT ?"
+                cursor = conn.execute(query, (*statuses, limit))
+            else:
+                cursor = conn.execute(query, statuses)
+
             return [dict(row) for row in cursor.fetchall()]
 
     # === Pages Operations ===

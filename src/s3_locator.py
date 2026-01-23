@@ -112,10 +112,10 @@ class S3Locator:
             Presigned URL string or None if failed
         """
         try:
-            # Use resource for async context with timeout configuration
-            async with self.session.resource('s3', config=self.boto_config) as s3:
-                # generate_presigned_url is available on the client
-                url = await s3.meta.client.generate_presigned_url(
+            # Use client directly for presigned URL generation
+            async with self.session.client('s3', config=self.boto_config) as s3_client:
+                # In aioboto3, generate_presigned_url is synchronous
+                url = await s3_client.generate_presigned_url(
                     'get_object',
                     Params={'Bucket': self.bucket_name, 'Key': s3_key},
                     ExpiresIn=expiration

@@ -165,11 +165,11 @@ class MigrationOrchestrator:
         self.logger.info("Starting Migration Phase")
         self.logger.info("=" * 60)
 
-        # Get books to migrate (pending or failed)
-        books = self.state_manager.get_all_books(limit=limit)
-
-        # Filter to only pending books
-        pending_books = [b for b in books if b['migration_status'] in ['pending', 'in_progress']]
+        # Get books to migrate (pending or in_progress only)
+        pending_books = self.state_manager.get_books_by_status(
+            statuses=['pending', 'in_progress'],
+            limit=limit
+        )
 
         if not pending_books:
             self.logger.info("No books to migrate. All books completed.")

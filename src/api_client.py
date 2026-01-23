@@ -98,7 +98,7 @@ class APIClient:
 
                             # Check if we should retry
                             if attempt < max_retries:
-                                wait_time = 2 ** attempt
+                                wait_time = 2 ** (attempt + 1)
                                 self.logger.info(f"Waiting {wait_time} seconds before retry...")
                                 await asyncio.sleep(wait_time)
                                 continue
@@ -109,7 +109,7 @@ class APIClient:
                 self.logger.error(f"Error creating book (attempt {attempt}/{max_retries}): {e}")
 
                 if attempt < max_retries:
-                    wait_time = 2 ** attempt
+                    wait_time = 2 ** (attempt + 1)
                     self.logger.info(f"Waiting {wait_time} seconds before retry...")
                     await asyncio.sleep(wait_time)
                     continue
@@ -154,17 +154,25 @@ class APIClient:
                 timeout = aiohttp.ClientTimeout(total=120)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(url, json=payload) as response:
-                        if response.status == 200:
+                        # Handle success responses: 200 (full success) or 207 (partial success)
+                        if response.status in [200, 207]:
                             data = await response.json()
-                            if data.get('success') and data.get('pages'):
+                            if data.get('success') and data.get('pages') and len(data['pages']) > 0:
                                 page_id = data['pages'][0].get('id')
                                 page_number = data['pages'][0].get('page_number')
+
+                                # Log if partial success (future-proofing for batch uploads)
+                                if response.status == 207 and data.get('errors'):
+                                    self.logger.warning(
+                                        f"Partial success (207): Page uploaded but API reported errors: {data.get('errors')}"
+                                    )
+
                                 if attempt > 1:
                                     self.logger.info(f"Successfully uploaded page from S3 on attempt {attempt}/{max_retries}")
                                 self.logger.debug(f"Successfully uploaded page from S3 (page_number={page_number}), ID: {page_id}")
                                 return page_id
                             else:
-                                self.logger.error(f"Upload succeeded but unexpected response format: {data}")
+                                self.logger.error(f"Upload response missing page data: {data}")
                                 # Don't retry for malformed responses
                                 return None
                         else:
@@ -173,8 +181,8 @@ class APIClient:
 
                             # Check if we should retry
                             if attempt < max_retries:
-                                # Calculate exponential backoff: 2^attempt seconds
-                                wait_time = 2 ** attempt
+                                # Calculate exponential backoff: 2^(attempt+1) seconds
+                                wait_time = 2 ** (attempt + 1)
                                 self.logger.info(f"Waiting {wait_time} seconds before retry...")
                                 await asyncio.sleep(wait_time)
                                 continue
@@ -187,8 +195,8 @@ class APIClient:
 
                 # Check if we should retry
                 if attempt < max_retries:
-                    # Calculate exponential backoff: 2^attempt seconds
-                    wait_time = 2 ** attempt
+                    # Calculate exponential backoff: 2^(attempt+1) seconds
+                    wait_time = 2 ** (attempt + 1)
                     self.logger.info(f"Waiting {wait_time} seconds before retry...")
                     await asyncio.sleep(wait_time)
                     continue
@@ -242,7 +250,7 @@ class APIClient:
                             self.logger.error(f"Failed to update book after upload (attempt {attempt}/{max_retries}). Status: {response.status}, Response: {text}")
 
                             if attempt < max_retries:
-                                wait_time = 2 ** attempt
+                                wait_time = 2 ** (attempt + 1)
                                 self.logger.info(f"Waiting {wait_time} seconds before retry...")
                                 await asyncio.sleep(wait_time)
                                 continue
@@ -253,7 +261,7 @@ class APIClient:
                 self.logger.error(f"Error updating book after upload (attempt {attempt}/{max_retries}): {e}")
 
                 if attempt < max_retries:
-                    wait_time = 2 ** attempt
+                    wait_time = 2 ** (attempt + 1)
                     self.logger.info(f"Waiting {wait_time} seconds before retry...")
                     await asyncio.sleep(wait_time)
                     continue
@@ -298,7 +306,7 @@ class APIClient:
                             self.logger.warning(f"Book {book_id} verification failed (attempt {attempt}/{max_retries}). Status: {response.status}")
 
                             if attempt < max_retries:
-                                wait_time = 2 ** attempt
+                                wait_time = 2 ** (attempt + 1)
                                 self.logger.info(f"Waiting {wait_time} seconds before retry...")
                                 await asyncio.sleep(wait_time)
                                 continue
@@ -309,7 +317,7 @@ class APIClient:
                 self.logger.error(f"Error verifying book {book_id} (attempt {attempt}/{max_retries}): {e}")
 
                 if attempt < max_retries:
-                    wait_time = 2 ** attempt
+                    wait_time = 2 ** (attempt + 1)
                     self.logger.info(f"Waiting {wait_time} seconds before retry...")
                     await asyncio.sleep(wait_time)
                     continue
