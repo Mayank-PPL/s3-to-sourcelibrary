@@ -29,6 +29,10 @@ class StateManager:
         """Context manager for database connections."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+
+        # Set connection-level PRAGMAs (must be set on each new connection)
+        conn.execute("PRAGMA busy_timeout = 5000")  # Wait 5 seconds on lock contention
+
         try:
             yield conn
             conn.commit()
@@ -175,12 +179,6 @@ class StateManager:
                 SET uploaded_pages = uploaded_pages + 1
                 WHERE picturae_barcode = ?
             """, (barcode,))
-
-    def get_books_by_status(self, status: str) -> List[Dict]:
-        """Get all books with given status."""
-        with self.get_connection() as conn:
-            cursor = conn.execute("SELECT * FROM books WHERE migration_status = ?", (status,))
-            return [dict(row) for row in cursor.fetchall()]
 
     def get_all_books(self, limit: Optional[int] = None) -> List[Dict]:
         """Get all books, optionally limited."""

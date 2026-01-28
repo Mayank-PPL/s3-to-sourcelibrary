@@ -1,2 +1,0 @@
-data/index/migration_state.db filter=lfs diff=lfs merge=lfs -text
-logs/migration.log filter=lfs diff=lfs merge=lfs -text

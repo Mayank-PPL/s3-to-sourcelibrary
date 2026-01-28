@@ -240,7 +240,7 @@ class MigrationOrchestrator:
             if not api_book_id:
                 # Create book via API
                 metadata = json.loads(book['metadata_json'])
-                api_book_id = await self.api_client.create_book(metadata)
+                api_book_id = await self.api_client.create_book(metadata, max_retries=self.config.max_retries)
 
                 if not api_book_id:
                     raise Exception("Failed to create book via API")
@@ -280,7 +280,7 @@ class MigrationOrchestrator:
 
             if uploaded_count == total_pages:
                 # All pages successfully uploaded
-                update_success = await self.api_client.update_book_after_upload(api_book_id)
+                update_success = await self.api_client.update_book_after_upload(api_book_id, max_retries=self.config.max_retries)
                 if update_success:
                     self.state_manager.update_book_status(barcode, 'completed')
                     self.logger.info(f"Book {barcode} migration completed: {uploaded_count}/{total_pages} pages uploaded, API notified")
@@ -341,7 +341,7 @@ class MigrationOrchestrator:
                 raise Exception(f"Failed to generate presigned URL for: {s3_key}")
 
             # Step 3: Upload to API using S3 presigned URL
-            api_page_id = await self.api_client.upload_page_from_s3(api_book_id, presigned_url)
+            api_page_id = await self.api_client.upload_page_from_s3(api_book_id, presigned_url, max_retries=self.config.max_retries)
 
             if not api_page_id:
                 raise Exception("Failed to upload page to API via S3 link")
