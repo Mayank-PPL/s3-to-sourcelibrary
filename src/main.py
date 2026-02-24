@@ -29,6 +29,10 @@ Examples:
   python -m src.main verify --export report.csv  # Export verification report
   python -m src.main reset --book RIT123      # Reset specific book
   python -m src.main reset --all-migration    # Reset all migration state
+  python -m src.main update-books --dry-run   # Preview eligible books
+  python -m src.main update-books             # Update all eligible books
+  python -m src.main update-books --completed-only  # Update only completed books
+  python -m src.main update-books --books RIT001,RIT002  # Update specific books
         """
     )
 
@@ -58,6 +62,43 @@ Examples:
     reset_parser.add_argument('--book', type=str, help='Reset specific book by Picturae barcode')
     reset_parser.add_argument('--all-migration', action='store_true', help='Reset all migration state (keeps index)')
     reset_parser.add_argument('--full', action='store_true', help='Delete entire database (full reset)')
+
+    # Update-books command
+    update_parser = subparsers.add_parser(
+        'update-books',
+        help='Manually trigger update_book_after_upload for eligible books'
+    )
+    update_parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Preview which books would be updated without making API calls'
+    )
+    update_parser.add_argument(
+        '--books',
+        type=str,
+        help='Comma-separated list of barcodes to update (e.g., RIT001000021,RIT001000022)'
+    )
+    update_parser.add_argument(
+        '--completed-only',
+        action='store_true',
+        help='Only update books with status "completed"'
+    )
+    update_parser.add_argument(
+        '--in-progress-only',
+        action='store_true',
+        help='Only update books with status "in_progress" (that have no pending pages)'
+    )
+    update_parser.add_argument(
+        '--max-retries',
+        type=int,
+        default=3,
+        help='Maximum retry attempts per book (default: 3)'
+    )
+    update_parser.add_argument(
+        '--limit',
+        type=int,
+        help='Limit to first N eligible books (for testing)'
+    )
 
     args = parser.parse_args()
 
@@ -116,6 +157,46 @@ Examples:
         logger.info("Running reset command...")
         handle_reset(orchestrator.state_manager, args, logger)
         sys.exit(0)
+
+    elif args.command == 'update-books':
+        import asyncio
+        from src.book_updater import BookUpdater
+
+        logger.info("Running update-books command...")
+
+        # Initialize BookUpdater
+        updater = BookUpdater(
+            orchestrator.api_client,
+            orchestrator.state_manager,
+            logger
+        )
+
+        # Parse barcode list if provided
+        barcodes = None
+        if args.books:
+            barcodes = [b.strip() for b in args.books.split(',')]
+
+        # Determine which statuses to include
+        include_completed = not args.in_progress_only
+        include_in_progress = not args.completed_only
+
+        # Run async update
+        results = asyncio.run(updater.update_eligible_books(
+            include_completed=include_completed,
+            include_in_progress=include_in_progress,
+            barcodes=barcodes,
+            dry_run=args.dry_run,
+            max_retries=args.max_retries,
+            limit=args.limit
+        ))
+
+        # Log final summary
+        if results['failed'] > 0:
+            logger.error(f"Update completed with {results['failed']} failures")
+            sys.exit(1)
+        else:
+            logger.info("Update completed successfully")
+            sys.exit(0)
 
     else:
         # No command specified - run in auto mode

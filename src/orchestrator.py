@@ -257,22 +257,24 @@ class MigrationOrchestrator:
 
             if not pages:
                 self.logger.info(f"No pending/failed pages for book {barcode}, marking as completed")
-                self.state_manager.update_book_status(barcode, 'completed')
-                return
+                self.state_manager.update_book_status(barcode, 'completed')                
 
-            self.logger.info(f"Uploading {len(pages)} pages for book {barcode} (sequential)")
+            else:
+                self.logger.info(f"Uploading {len(pages)} pages for book {barcode} (sequential)")
 
-            # Upload pages ONE AT A TIME in sequence order
-            for idx, page in enumerate(pages):
-                if self.shutdown_requested:
-                    break
+                # Upload pages ONE AT A TIME in sequence order
+                for idx, page in enumerate(pages):
+                    if self.shutdown_requested:
+                        break
 
-                await self._upload_single_page_async(barcode, api_book_id, page)
+                    await self._upload_single_page_async(barcode, api_book_id, page)
 
-                # Add delay between requests to avoid rate limiting (skip delay after last page)
-                if idx < len(pages) - 1 and self.config.request_delay > 0:
-                    await asyncio.sleep(self.config.request_delay)
+                    # Add delay between requests to avoid rate limiting (skip delay after last page)
+                    if idx < len(pages) - 1 and self.config.request_delay > 0:
+                        await asyncio.sleep(self.config.request_delay)
 
+            update_success = await self.api_client.update_book_after_upload(api_book_id, max_retries=self.config.max_retries)
+            
             # Mark book as completed if all pages uploaded
             # Check uploaded count against total pages (future-proof for any status types)
             uploaded_count = self.state_manager.count_uploaded_pages_for_book(barcode)
@@ -280,7 +282,6 @@ class MigrationOrchestrator:
 
             if uploaded_count == total_pages:
                 # All pages successfully uploaded
-                update_success = await self.api_client.update_book_after_upload(api_book_id, max_retries=self.config.max_retries)
                 if update_success:
                     self.state_manager.update_book_status(barcode, 'completed')
                     self.logger.info(f"Book {barcode} migration completed: {uploaded_count}/{total_pages} pages uploaded, API notified")

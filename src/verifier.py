@@ -38,7 +38,7 @@ class MigrationVerifier:
         self.logger.info("=" * 60)
 
         # Get completed books from database
-        completed_books = self.state_manager.get_books_by_status('completed')
+        completed_books = self.state_manager.get_books_by_status(['completed'])
 
         if limit:
             completed_books = completed_books[:limit]
