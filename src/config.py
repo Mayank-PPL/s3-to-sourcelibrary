@@ -21,6 +21,7 @@ class Config:
 
     # API Configuration
     api_base_url: str
+    sl_api_secret: str
 
     # CSV Configuration
     books_csv_path: str
@@ -78,7 +79,8 @@ def load_config(env_file: str = ".env") -> Config:
         s3_base_prefix=get_optional("S3_BASE_PREFIX", "collection/export_dam_files/jp2"),
 
         # API
-        api_base_url=get_required("API_BASE_URL"),        
+        api_base_url=get_required("API_BASE_URL"),
+        sl_api_secret=get_required("SL_API_SECRET"),
 
         # CSV
         books_csv_path=get_optional("BOOKS_CSV_PATH", "./data/csv/ScannedBooks.csv"),

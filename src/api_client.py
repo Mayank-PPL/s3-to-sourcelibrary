@@ -34,6 +34,18 @@ class APIClient:
             reraise=True
         )
 
+    def _get_authorization_header_value(self) -> Optional[str]:
+        """Return the Authorization header value for protected endpoints."""
+        sl_api_secret = getattr(self.config, "sl_api_secret", None)
+        if not sl_api_secret:
+            return None
+
+        # If the secret already includes a scheme (e.g. "Bearer ..."), pass through.
+        if " " in sl_api_secret.strip():
+            return sl_api_secret.strip()
+
+        return f"Bearer {sl_api_secret.strip()}"
+
     async def create_book(self, metadata: Dict, max_retries: int = 3) -> Optional[str]:
         """
         Create a book via API with retry logic.
@@ -53,6 +65,11 @@ class APIClient:
             Book ID from API response, or None if failed after all retries
         """
         url = f"{self.base_url}/api/books"
+
+        auth_value = self._get_authorization_header_value()
+        if not auth_value:
+            self.logger.error("SL_API_SECRET is missing; cannot call POST /api/books")
+            return None
 
         # Map metadata fields to API expected format
         payload = {
@@ -83,7 +100,10 @@ class APIClient:
                     async with session.post(
                         url,
                         json=payload,
-                        headers={'Content-Type': 'application/json'}
+                        headers={
+                            'Content-Type': 'application/json',
+                            'Authorization': auth_value,
+                        }
                     ) as response:
                         if response.status == 201:
                             data = await response.json()

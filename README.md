@@ -94,6 +94,7 @@ S3_BASE_PREFIX=collection/export_dam_files/jp2
 
 # API Configuration
 API_BASE_URL=https://your-api.com
+SL_API_SECRET=your_api_secret
 
 # CSV Configuration
 BOOKS_CSV_PATH=./data/csv/ScannedBooks.csv
