@@ -44,8 +44,12 @@ class MigrationOrchestrator:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully."""
-        self.logger.info("Shutdown signal received. Finishing current operations...")
+        """Handle shutdown signals gracefully. Second signal forces immediate exit."""
+        if self.shutdown_requested:
+            self.logger.info("Force shutdown requested. Exiting immediately.")
+            sys.exit(1)
+        self.logger.info("Shutdown signal received. Finishing current page upload(s), then stopping...")
+        self.logger.info("Press Ctrl+C again to force quit immediately.")
         self.shutdown_requested = True
 
     def run_indexing(self, force: bool = False) -> bool:
@@ -191,7 +195,9 @@ class MigrationOrchestrator:
             # Wait for all books to complete with progress bar
             for future in tqdm(as_completed(futures), total=len(futures), desc="Books"):
                 if self.shutdown_requested:
-                    self.logger.info("Shutdown requested, waiting for in-progress books to finish...")
+                    self.logger.info("Shutdown requested, cancelling pending books...")
+                    for f in futures:
+                        f.cancel()
                     break
 
                 try:
@@ -234,6 +240,15 @@ class MigrationOrchestrator:
         self.logger.info(f"Processing book: {barcode}, {title}")
 
         try:
+            if self.shutdown_requested:
+                return
+
+            # Skip books with no pages — don't create an empty entry on the platform
+            if book.get('total_pages', 0) == 0:
+                self.logger.info(f"Skipping book {barcode} — no pages indexed")
+                self.state_manager.update_book_status(barcode, 'skipped', 'No pages found for this book')
+                return
+
             # Check if book already created
             api_book_id = book.get('api_book_id')
 
@@ -371,6 +386,7 @@ class MigrationOrchestrator:
         print(f"  Completed:   {stats['completed_books']}")
         print(f"  In Progress: {stats['in_progress_books']}")
         print(f"  Pending:     {stats['pending_books']}")
+        print(f"  Skipped:     {stats['skipped_books']} (no pages)")
         print(f"  Failed:      {stats['failed_books']}")
 
         print(f"\nPages:")

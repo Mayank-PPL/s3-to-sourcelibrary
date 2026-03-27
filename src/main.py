@@ -33,6 +33,8 @@ Examples:
   python -m src.main update-books             # Update all eligible books
   python -m src.main update-books --completed-only  # Update only completed books
   python -m src.main update-books --books RIT001,RIT002  # Update specific books
+  python -m src.main reconcile --dry-run         # Preview which books would be reset
+  python -m src.main reconcile                   # Reset DB entries for platform-deleted books
         """
     )
 
@@ -62,6 +64,22 @@ Examples:
     reset_parser.add_argument('--book', type=str, help='Reset specific book by Picturae barcode')
     reset_parser.add_argument('--all-migration', action='store_true', help='Reset all migration state (keeps index)')
     reset_parser.add_argument('--full', action='store_true', help='Delete entire database (full reset)')
+
+    # Reconcile command
+    reconcile_parser = subparsers.add_parser(
+        'reconcile',
+        help='Reconcile DB state with platform: reset books deleted from the platform'
+    )
+    reconcile_parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show what would be reset without making any changes'
+    )
+    reconcile_parser.add_argument(
+        '--limit',
+        type=int,
+        help='Limit to first N books with an API ID (for testing)'
+    )
 
     # Update-books command
     update_parser = subparsers.add_parser(
@@ -156,6 +174,11 @@ Examples:
     elif args.command == 'reset':
         logger.info("Running reset command...")
         handle_reset(orchestrator.state_manager, args, logger)
+        sys.exit(0)
+
+    elif args.command == 'reconcile':
+        logger.info("Running reconcile command...")
+        handle_reconcile(orchestrator, config, args, logger)
         sys.exit(0)
 
     elif args.command == 'update-books':
@@ -289,6 +312,138 @@ def handle_reset(state_manager: StateManager, args, logger) -> None:
 
     else:
         logger.error("No reset option specified. Use --book, --all-migration, or --full")
+
+
+def handle_reconcile(orchestrator, config, args, logger) -> None:
+    """
+    Reconcile DB state with the platform.
+
+    For every book in the DB that has an api_book_id, check whether it still
+    exists on the platform.  Books that return HTTP 404 were deleted from the
+    platform; reset them to 'pending' so the next migration run re-creates
+    them and uploads their pages.
+
+    Books that return HTTP 200 (still exist) are left untouched — the
+    migration tool will continue uploading their pending pages on the next run.
+
+    Books that return any other status (network error, 5xx, etc.) are skipped
+    rather than reset, so we don't accidentally wipe legitimate state due to a
+    transient failure.
+    """
+    import asyncio
+
+    state_manager = orchestrator.state_manager
+    books = state_manager.get_books_with_api_id()
+    if args.limit:
+        books = books[:args.limit]
+
+    if not books:
+        logger.info("No books with an API ID found in DB — nothing to reconcile.")
+        return
+
+    results = asyncio.run(_reconcile_async(books, config, orchestrator, logger))
+
+    to_reset = results['to_reset']
+    dry_run = args.dry_run
+
+    # Apply resets
+    if to_reset and not dry_run:
+        logger.info(f"Resetting {len(to_reset)} deleted book(s) in DB...")
+        for barcode in to_reset:
+            state_manager.reset_book_migration(barcode)
+            logger.info(f"  Reset {barcode}")
+
+    # Summary
+    logger.info("=" * 60)
+    logger.info("Reconciliation Summary")
+    logger.info("=" * 60)
+    logger.info(f"  Checked:             {len(books)}")
+    logger.info(f"  Found on platform:   {results['found']}")
+    logger.info(f"  Deleted (reset):     {len(to_reset)}" + (" [DRY RUN — not applied]" if dry_run else ""))
+    logger.info(f"  Skipped (errors):    {results['errors']}")
+    if results['error_counts']:
+        logger.info("  Error breakdown:")
+        for reason, count in sorted(results['error_counts'].items(), key=lambda x: -x[1]):
+            logger.info(f"    {reason}: {count}")
+    logger.info("=" * 60)
+
+    if to_reset and not dry_run:
+        logger.info(f"{len(to_reset)} book(s) reset to 'pending'. Run 'migrate' to re-upload them.")
+    elif to_reset and dry_run:
+        logger.info(f"Re-run without --dry-run to apply the {len(to_reset)} reset(s).")
+
+
+async def _reconcile_async(books: list, config, orchestrator, logger) -> dict:
+    """Check each book against the platform API using aiohttp."""
+    import aiohttp
+
+    base_url = config.api_base_url.rstrip('/')
+    max_retries = config.max_retries
+    total = len(books)
+    found = 0
+    errors = 0
+    error_counts: dict = {}
+    to_reset = []
+
+    logger.info(f"Checking {total} book(s) against the platform...")
+
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent': 'SourceLibrary-MCP/'}) as session:
+        for idx, book in enumerate(books, 1):
+            if orchestrator.shutdown_requested:
+                logger.info("Shutdown requested — stopping reconcile.")
+                break
+
+            barcode = book['picturae_barcode']
+            api_book_id = book['api_book_id']
+            url = f"{base_url}/api/books/{api_book_id}"
+
+            status = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    async with session.get(url) as response:
+                        status = response.status
+
+                        if status == 429:
+                            logger.warning(f"[{idx}/{total}] Rate limited — retrying {attempt}/{max_retries}")
+                            continue
+
+                        break  # got a definitive response
+
+                except Exception as e:
+                    if attempt < max_retries:
+                        continue
+                    errors += 1
+                    key = type(e).__name__
+                    error_counts[key] = error_counts.get(key, 0) + 1
+                    logger.warning(f"[{idx}/{total}] SKIP    {barcode} — {key}: {e}")
+                    status = None
+                    break
+
+            if status == 200:
+                found += 1
+                logger.info(f"[{idx}/{total}] OK      {barcode}")
+            elif status == 404:
+                to_reset.append(barcode)
+                logger.info(f"[{idx}/{total}] DELETED {barcode} — will reset")
+            elif status == 429:
+                # Still rate limited after all retries
+                errors += 1
+                key = "HTTP 429"
+                error_counts[key] = error_counts.get(key, 0) + 1
+                logger.warning(f"[{idx}/{total}] SKIP    {barcode} — still rate limited after {max_retries} retries")
+            elif status is not None:
+                errors += 1
+                key = f"HTTP {status}"
+                error_counts[key] = error_counts.get(key, 0) + 1
+                logger.warning(f"[{idx}/{total}] SKIP    {barcode} — {key}")
+
+    return {
+        'found': found,
+        'to_reset': to_reset,
+        'errors': errors,
+        'error_counts': error_counts,
+    }
 
 
 if __name__ == '__main__':

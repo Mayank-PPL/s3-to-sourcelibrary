@@ -314,6 +314,9 @@ class StateManager:
             cursor.execute("SELECT COUNT(*) FROM books WHERE migration_status = 'in_progress'")
             in_progress_books = cursor.fetchone()[0]
 
+            cursor.execute("SELECT COUNT(*) FROM books WHERE migration_status = 'skipped'")
+            skipped_books = cursor.fetchone()[0]
+
             # Page statistics
             cursor.execute("SELECT COUNT(*) FROM pages")
             total_pages = cursor.fetchone()[0]
@@ -335,7 +338,8 @@ class StateManager:
                 "completed_books": completed_books,
                 "failed_books": failed_books,
                 "in_progress_books": in_progress_books,
-                "pending_books": total_books - completed_books - failed_books - in_progress_books,
+                "skipped_books": skipped_books,
+                "pending_books": total_books - completed_books - failed_books - in_progress_books - skipped_books,
                 "total_pages": total_pages,
                 "uploaded_pages": uploaded_pages,
                 "failed_pages": failed_pages,
@@ -422,6 +426,14 @@ class StateManager:
                 SET upload_status = 'pending', api_page_id = NULL,
                     error_message = NULL, attempt_count = 0, uploaded_at = NULL
             """)
+
+    def get_books_with_api_id(self) -> List[Dict]:
+        """Get all books that have been submitted to the API (api_book_id is set)."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM books WHERE api_book_id IS NOT NULL ORDER BY picturae_barcode"
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def delete_all_data(self) -> None:
         """Delete all data from database (full reset)."""

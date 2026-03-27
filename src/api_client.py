@@ -96,7 +96,7 @@ class APIClient:
                 self.logger.debug(f"POST {url} with payload: {payload}")
 
                 timeout = aiohttp.ClientTimeout(total=30)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent': 'SourceLibrary-MCP/'}) as session:
                     async with session.post(
                         url,
                         json=payload,
@@ -171,8 +171,8 @@ class APIClient:
                     "imageUrls": [s3_url]  # Single-item array
                 }
 
-                timeout = aiohttp.ClientTimeout(total=120)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                timeout = aiohttp.ClientTimeout(total=300)
+                async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent': 'SourceLibrary-MCP/'}) as session:
                     async with session.post(url, json=payload) as response:
                         # Handle success responses: 200 (full success) or 207 (partial success)
                         if response.status in [200, 207]:
@@ -258,7 +258,7 @@ class APIClient:
                 }
 
                 timeout = aiohttp.ClientTimeout(total=30)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent': 'SourceLibrary-MCP/'}) as session:
                     async with session.post(url, json=payload) as response:
                         if response.status == 200:
                             if attempt > 1:
@@ -316,7 +316,7 @@ class APIClient:
                 self.logger.debug(f"Verifying book {book_id} (attempt {attempt}/{max_retries})")
 
                 timeout = aiohttp.ClientTimeout(total=30)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent': 'SourceLibrary-MCP/'}) as session:
                     async with session.get(url) as response:
                         if response.status == 200:
                             if attempt > 1:
